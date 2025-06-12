@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Valorant Style Living Street</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            display: block;
+            cursor: default;
+        }
+        #instructions {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 100;
+            border: 2px solid #ff4655;
+            box-shadow: 0 0 20px rgba(255, 70, 85, 0.3);
+        }
+        #instructions strong {
+            color: #ff4655;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #00d4ff;
+            font-size: 18px;
+            text-align: center;
+            z-index: 200;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <strong>LOADING ENVIRONMENT...</strong><br>
+        <div style="margin-top: 10px;">■■■□□ 60%</div>
+    </div>
+
+    <div id="instructions">
+        <strong>VALORANT LIVING STREET</strong><br>
+        WASD / Arrow Keys - Move<br>
+        Mouse - Look around<br>
+        Space - Jump<br>
+        <div style="margin-top: 8px; color: #00d4ff;">
+            + Animated environment<br>
+            + GLB model support<br>
+            + Dynamic lighting
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://threejs.org/examples/js/loaders/GLTFLoader.js"></script>
+    <script>
+        // Scene setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.setClearColor(0x1a1a2e);
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.2;
+        document.body.appendChild(renderer.domElement);
+
+        // GLTF Loader for GLB files (check if available, otherwise skip GLB loading)
+        let loader = null;
+        let hasGLTFLoader = false;
+        
+        try {
+            if (typeof THREE.GLTFLoader !== 'undefined') {
+                loader = new THREE.GLTFLoader();
+                hasGLTFLoader = true;
+                console.log('GLTFLoader available!');
+            }
+        } catch (e) {
+            console.log('GLTFLoader not available, using fallback buildings');
+            hasGLTFLoader = false;
+        }
+        const loadedModels = [];
+        const animationMixers = [];
+
+        // Valorant-style color palette
+        const colors = {
+            primary: 0xff4655,     // Valorant red
+            secondary: 0x00d4ff,   // Cyan blue
+            accent: 0xffd700,      // Gold
+            building1: 0x2d3561,   // Dark blue
+            building2: 0x3c4043,   // Dark gray
+            building3: 0x4a5568,   // Blue gray
+            street: 0x2a2a3e,      // Dark street
+            sidewalk: 0x4a4a5e,    // Lighter sidewalk
+            neon: 0x00ffff,        // Bright cyan
+            white: 0xffffff,
+            particle: 0xff6b35     // Orange particles
+        };
+
+        // Particle systems for atmosphere
+        const particles = [];
+        const floatingObjects = [];
+
+        // Enhanced skybox with moving clouds
+        const skyBoxGeometry = new THREE.SphereGeometry(500, 32, 32);
+        const skyBoxMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                topColor: { value: new THREE.Color(0x0f1419) },
+                middleColor: { value: new THREE.Color(0x1a1a2e) },
+                bottomColor: { value: new THREE.Color(0x2d3561) },
+                offset: { value: 50 },
+                exponent: { value: 0.8 },
+                time: { value: 0.0 }
+            },
+            vertexShader: `
+                varying vec3 vWorldPosition;
+                uniform float time;
+                void main() {
+                    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                    vWorldPosition = worldPosition.xyz;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 topColor;
+                uniform vec3 middleColor;
+                uniform vec3 bottomColor;
+                uniform float offset;
+                uniform float exponent;
+                uniform float time;
+                varying vec3 vWorldPosition;
+                
+                float noise(vec2 st) {
+                    return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+                }
+                
+                void main() {
+                    float h = normalize(vWorldPosition + offset).y;
+                    vec3 color = mix(bottomColor, middleColor, max(pow(max(h, 0.0), exponent), 0.0));
+                    if (h > 0.5) {
+                        color = mix(middleColor, topColor, max(pow(max(h - 0.5, 0.0) * 2.0, exponent), 0.0));
+                    }
+                    
+                    // Add moving cloud effect
+                    vec2 cloudUV = vWorldPosition.xz * 0.001 + time * 0.02;
+                    float cloudNoise = noise(cloudUV) * 0.1;
+                    color += cloudNoise;
+                    
+                    gl_FragColor = vec4(color, 1.0);
+                }
+            `,
+            side: THREE.BackSide
+        });
+        const skyBox = new THREE.Mesh(skyBoxGeometry, skyBoxMaterial);
+        scene.add(skyBox);
+
+        // Function to load GLB models
+        function loadGLBModel(url, position, scale = 1, rotation = 0) {
+            if (!hasGLTFLoader || !loader) {
+                console.log('GLTFLoader not available, creating fallback building');
+                createFallbackBuilding(position, scale);
+                return;
+            }
+            
+            loader.load(
+                url,
+                function (gltf) {
+                    const model = gltf.scene;
+                    model.position.set(position.x, position.y, position.z);
+                    model.scale.setScalar(scale);
+                    model.rotation.y = rotation;
+                    
+                    // Enable shadows
+                    model.traverse(function (child) {
+                        if (child.isMesh) {
+                            child.castShadow = true;
+                            child.receiveShadow = true;
+                        }
+                    });
+                    
+                    scene.add(model);
+                    loadedModels.push(model);
+                    
+                    // Add animation mixer if animations exist
+                    if (gltf.animations.length > 0) {
+                        const mixer = new THREE.AnimationMixer(model);
+                        gltf.animations.forEach((clip) => {
+                            mixer.clipAction(clip).play();
+                        });
+                        animationMixers.push(mixer);
+                    }
+                },
+                function (progress) {
+                    console.log('Loading progress:', (progress.loaded / progress.total * 100) + '%');
+                },
+                function (error) {
+                    console.log('Error loading GLB:', error);
+                    // Create fallback geometry if GLB fails to load
+                    createFallbackBuilding(position, scale);
+                }
+            );
+        }
+
+        // Fallback building creator
+        function createFallbackBuilding(position, scale) {
+            const geometry = new THREE.BoxGeometry(15 * scale, 25 * scale, 15 * scale);
+            const material = new THREE.MeshPhongMaterial({ 
+                color: colors.building1,
+                flatShading: true
+            });
+            const building = new THREE.Mesh(geometry, material);
+            building.position.copy(position);
+            building.position.y += (25 * scale) / 2;
+            building.castShadow = true;
+            building.receiveShadow = true;
+            scene.add(building);
+        }
+
+        // Street layout with animated elements
+        function createAnimatedStreet() {
+            // Main street with animated textures
+            const streetGeometry = new THREE.PlaneGeometry(20, 200);
+            const streetMaterial = new THREE.MeshLambertMaterial({ 
+                color: colors.street,
+                side: THREE.DoubleSide
+            });
+            const street = new THREE.Mesh(streetGeometry, streetMaterial);
+            street.rotation.x = -Math.PI / 2;
+            street.position.set(0, 0.01, 0);
+            street.receiveShadow = true;
+            scene.add(street);
+
+            // Animated street markings
+            for (let i = -90; i <= 90; i += 10) {
+                const markingGeometry = new THREE.PlaneGeometry(1, 4);
+                const markingMaterial = new THREE.MeshBasicMaterial({ 
+                    color: colors.white,
+                    transparent: true,
+                    opacity: 0.8
+                });
+                const marking = new THREE.Mesh(markingGeometry, markingMaterial);
+                marking.rotation.x = -Math.PI / 2;
+                marking.position.set(0, 0.02, i);
+                scene.add(marking);
+                
+                // Add to animated objects
+                floatingObjects.push({
+                    mesh: marking,
+                    originalY: 0.02,
+                    speed: 0.002,
+                    amplitude: 0.05
+                });
+            }
+
+            // Cross street
+            const crossStreetGeometry = new THREE.PlaneGeometry(150, 15);
+            const crossStreet = new THREE.Mesh(crossStreetGeometry, streetMaterial);
+            crossStreet.rotation.x = -Math.PI / 2;
+            crossStreet.position.set(0, 0.02, 0);
+            crossStreet.receiveShadow = true;
+            scene.add(crossStreet);
+
+            // Animated sidewalks
+            createAnimatedSidewalks();
+        }
+
+        function createAnimatedSidewalks() {
+            const sidewalkGeometry = new THREE.PlaneGeometry(8, 200);
+            const sidewalkMaterial = new THREE.MeshLambertMaterial({ 
+                color: colors.sidewalk,
+                side: THREE.DoubleSide
+            });
+            
+            const leftSidewalk = new THREE.Mesh(sidewalkGeometry, sidewalkMaterial);
+            leftSidewalk.rotation.x = -Math.PI / 2;
+            leftSidewalk.position.set(-14, 0.03, 0);
+            leftSidewalk.receiveShadow = true;
+            scene.add(leftSidewalk);
+
+            const rightSidewalk = new THREE.Mesh(sidewalkGeometry, sidewalkMaterial);
+            rightSidewalk.rotation.x = -Math.PI / 2;
+            rightSidewalk.position.set(14, 0.03, 0);
+            rightSidewalk.receiveShadow = true;
+            scene.add(rightSidewalk);
+        }
+
+        // Create floating particle systems
+        function createParticleSystem() {
+            const particleCount = 200;
+            const particleGeometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            const velocities = [];
+
+            for (let i = 0; i < particleCount; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * 200;
+                positions[i * 3 + 1] = Math.random() * 50 + 10;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 200;
+                
+                velocities.push({
+                    x: (Math.random() - 0.5) * 0.02,
+                    y: Math.random() * 0.01,
+                    z: (Math.random() - 0.5) * 0.02
+                });
+            }
+
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            const particleMaterial = new THREE.PointsMaterial({
+                color: colors.particle,
+                size: 2,
+                transparent: true,
+                opacity: 0.6,
+                blending: THREE.AdditiveBlending
+            });
+
+            const particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+            scene.add(particleSystem);
+
+            particles.push({
+                system: particleSystem,
+                velocities: velocities,
+                positions: positions
+            });
+        }
+
+        // Enhanced lamp posts with animations
+        function createAnimatedLampPost(x, z) {
+            // Post
+            const postGeometry = new THREE.CylinderGeometry(0.3, 0.3, 8);
+            const postMaterial = new THREE.MeshPhongMaterial({ 
+                color: colors.building2,
+                flatShading: true
+            });
+            const post = new THREE.Mesh(postGeometry, postMaterial);
+            post.position.set(x, 4, z);
+            post.castShadow = true;
+            scene.add(post);
+
+            // Animated light with pulsing
+            const lightGeometry = new THREE.SphereGeometry(0.8, 8, 6);
+            const lightMaterial = new THREE.MeshPhongMaterial({ 
+                color: colors.neon,
+                emissive: colors.neon,
+                emissiveIntensity: 0.5
+            });
+            const lightBulb = new THREE.Mesh(lightGeometry, lightMaterial);
+            lightBulb.position.set(x, 8, z);
+            scene.add(lightBulb);
+
+            // Animated point light
+            const pointLight = new THREE.PointLight(colors.neon, 0.5, 20);
+            pointLight.position.set(x, 8, z);
+            pointLight.castShadow = true;
+            scene.add(pointLight);
+
+            // Add to floating objects for animation
+            floatingObjects.push({
+                mesh: lightBulb,
+                light: pointLight,
+                originalY: 8,
+                speed: 0.003 + Math.random() * 0.002,
+                amplitude: 0.1,
+                pulseSpeed: 0.05,
+                material: lightMaterial
+            });
+        }
+
+        // Create floating holographic displays
+        function createHolographicDisplays() {
+            for (let i = 0; i < 5; i++) {
+                const displayGeometry = new THREE.PlaneGeometry(4, 6);
+                const displayMaterial = new THREE.MeshBasicMaterial({ 
+                    color: colors.secondary,
+                    transparent: true,
+                    opacity: 0.3,
+                    side: THREE.DoubleSide
+                });
+                const display = new THREE.Mesh(displayGeometry, displayMaterial);
+                display.position.set(
+                    (Math.random() - 0.5) * 100,
+                    8 + Math.random() * 10,
+                    (Math.random() - 0.5) * 100
+                );
+                display.rotation.y = Math.random() * Math.PI * 2;
+                scene.add(display);
+
+                floatingObjects.push({
+                    mesh: display,
+                    originalY: display.position.y,
+                    speed: 0.001 + Math.random() * 0.001,
+                    amplitude: 2,
+                    rotationSpeed: 0.01
+                });
+            }
+        }
+
+        // Build the living environment
+        createAnimatedStreet();
+        createParticleSystem();
+        createHolographicDisplays();
+
+        // Load GLB models for buildings (placeholder URLs - replace with your actual GLB files)
+        const buildingPositions = [
+            { pos: new THREE.Vector3(-35, 0, -60), scale: 1.5 },
+            { pos: new THREE.Vector3(-40, 0, -20), scale: 2.0 },
+            { pos: new THREE.Vector3(-35, 0, 20), scale: 1.2 },
+            { pos: new THREE.Vector3(35, 0, -50), scale: 1.8 },
+            { pos: new THREE.Vector3(40, 0, -10), scale: 1.6 },
+            { pos: new THREE.Vector3(32, 0, 30), scale: 1.3 }
+        ];
+
+        // Note: Replace these URLs with your actual GLB file URLs
+        const glbUrls = [
+            // 'path/to/your/building1.glb',
+            // 'path/to/your/building2.glb',
+            // 'path/to/your/building3.glb'
+        ];
+
+        // Load buildings (will use fallbacks if GLB URLs aren't available)
+        buildingPositions.forEach((config, index) => {
+            if (glbUrls[index % glbUrls.length]) {
+                loadGLBModel(glbUrls[index % glbUrls.length], config.pos, config.scale);
+            } else {
+                // Create fallback buildings with animation
+                createFallbackBuilding(config.pos, config.scale);
+            }
+        });
+
+        // Create animated lamp posts
+        for (let i = -80; i <= 80; i += 40) {
+            createAnimatedLampPost(-18, i);
+            createAnimatedLampPost(18, i);
+        }
+
+        // Enhanced lighting with movement
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.4);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(20, 30, 10);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 4096;
+        directionalLight.shadow.mapSize.height = 4096;
+        directionalLight.shadow.camera.near = 0.5;
+        directionalLight.shadow.camera.far = 200;
+        directionalLight.shadow.camera.left = -100;
+        directionalLight.shadow.camera.right = 100;
+        directionalLight.shadow.camera.top = 100;
+        directionalLight.shadow.camera.bottom = -100;
+        scene.add(directionalLight);
+
+        // Animated accent light
+        const accentLight = new THREE.DirectionalLight(colors.secondary, 0.3);
+        accentLight.position.set(-20, 15, -20);
+        scene.add(accentLight);
+
+        // Character controller (keeping your excellent system)
+        const moveState = {
+            forward: false,
+            backward: false,
+            left: false,
+            right: false
+        };
+
+        let velocity = new THREE.Vector3();
+        const moveSpeed = 15;
+        const jumpSpeed = 12;
+        let canJump = true;
+        let isGrounded = true;
+
+        let yaw = 0;
+        let pitch = 0;
+        const mouseSensitivity = 0.002;
+
+        camera.position.set(0, 2, 5);
+
+        // Mouse controls
+        document.addEventListener('mousemove', (event) => {
+            const mouseX = event.clientX;
+            const mouseY = event.clientY;
+            
+            yaw = -(mouseX - window.innerWidth / 2) * mouseSensitivity;
+            pitch = -(mouseY - window.innerHeight / 2) * mouseSensitivity;
+            
+            pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+
+            camera.rotation.order = 'YXZ';
+            camera.rotation.y = yaw;
+            camera.rotation.x = pitch;
+        });
+
+        // Keyboard controls
+        document.addEventListener('keydown', (event) => {
+            switch (event.code) {
+                case 'KeyW':
+                case 'ArrowUp':
+                    moveState.forward = true;
+                    break;
+                case 'KeyS':
+                case 'ArrowDown':
+                    moveState.backward = true;
+                    break;
+                case 'KeyA':
+                case 'ArrowLeft':
+                    moveState.left = true;
+                    break;
+                case 'KeyD':
+                case 'ArrowRight':
+                    moveState.right = true;
+                    break;
+                case 'Space':
+                    event.preventDefault();
+                    if (canJump && isGrounded) {
+                        velocity.y = jumpSpeed;
+                        canJump = false;
+                        isGrounded = false;
+                    }
+                    break;
+            }
+        });
+
+        document.addEventListener('keyup', (event) => {
+            switch (event.code) {
+                case 'KeyW':
+                case 'ArrowUp':
+                    moveState.forward = false;
+                    break;
+                case 'KeyS':
+                case 'ArrowDown':
+                    moveState.backward = false;
+                    break;
+                case 'KeyA':
+                case 'ArrowLeft':
+                    moveState.left = false;
+                    break;
+                case 'KeyD':
+                case 'ArrowRight':
+                    moveState.right = false;
+                    break;
+                case 'Space':
+                    canJump = true;
+                    break;
+            }
+        });
+
+        // Animation loop with all the life!
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const delta = clock.getDelta();
+            const elapsedTime = clock.getElapsedTime();
+
+            // Update GLB animations
+            animationMixers.forEach(mixer => {
+                mixer.update(delta);
+            });
+
+            // Update skybox
+            skyBoxMaterial.uniforms.time.value = elapsedTime * 0.1;
+
+            // Animate particles
+            particles.forEach(particleData => {
+                const positions = particleData.positions;
+                const velocities = particleData.velocities;
+                
+                for (let i = 0; i < positions.length / 3; i++) {
+                    positions[i * 3] += velocities[i].x;
+                    positions[i * 3 + 1] += velocities[i].y;
+                    positions[i * 3 + 2] += velocities[i].z;
+                    
+                    // Reset particles that go too far
+                    if (positions[i * 3 + 1] > 60) {
+                        positions[i * 3 + 1] = 10;
+                    }
+                    if (Math.abs(positions[i * 3]) > 100) {
+                        positions[i * 3] = (Math.random() - 0.5) * 200;
+                    }
+                    if (Math.abs(positions[i * 3 + 2]) > 100) {
+                        positions[i * 3 + 2] = (Math.random() - 0.5) * 200;
+                    }
+                }
+                
+                particleData.system.geometry.attributes.position.needsUpdate = true;
+            });
+
+            // Animate floating objects
+            floatingObjects.forEach(obj => {
+                const time = elapsedTime * obj.speed;
+                obj.mesh.position.y = obj.originalY + Math.sin(time) * obj.amplitude;
+                
+                if (obj.light) {
+                    obj.light.position.y = obj.mesh.position.y;
+                    // Pulsing light intensity
+                    const pulseTime = elapsedTime * obj.pulseSpeed;
+                    obj.light.intensity = 0.3 + Math.sin(pulseTime) * 0.2;
+                    obj.material.emissiveIntensity = 0.3 + Math.sin(pulseTime) * 0.2;
+                }
+                
+                if (obj.rotationSpeed) {
+                    obj.mesh.rotation.y += obj.rotationSpeed;
+                }
+            });
+
+            // Movement system (unchanged - it's perfect!)
+            const forward = new THREE.Vector3(0, 0, -1);
+            forward.applyQuaternion(camera.quaternion);
+            forward.y = 0;
+            forward.normalize();
+
+            const right = new THREE.Vector3(1, 0, 0);
+            right.applyQuaternion(camera.quaternion);
+            right.y = 0;
+            right.normalize();
+
+            const moveDistance = moveSpeed * delta;
+            
+            if (moveState.forward) {
+                camera.position.addScaledVector(forward, moveDistance);
+            }
+            if (moveState.backward) {
+                camera.position.addScaledVector(forward, -moveDistance);
+            }
+            if (moveState.right) {
+                camera.position.addScaledVector(right, moveDistance);
+            }
+            if (moveState.left) {
+                camera.position.addScaledVector(right, -moveDistance);
+            }
+
+            // Physics
+            if (!isGrounded) {
+                velocity.y -= 35 * delta;
+            }
+            
+            camera.position.y += velocity.y * delta;
+
+            if (camera.position.y <= 2) {
+                camera.position.y = 2;
+                velocity.y = 0;
+                isGrounded = true;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Window resize handler
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Hide loading screen after a delay
+        setTimeout(() => {
+            document.getElementById('loading').style.display = 'none';
+        }, 2000);
+
+        animate();
+    </script>
+</body>
+</html>
